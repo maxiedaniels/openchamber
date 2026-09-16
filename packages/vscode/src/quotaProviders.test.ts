@@ -14,7 +14,7 @@ process.env.OPENCHAMBER_DATA_DIR = temporaryQuotaDataDirectory;
 const ORIGINAL_FS = { ...fs };
 const AUTH = JSON.stringify({
   openai: { access: 'test-token' },
-  crof: { key: 'test-token' },
+  'cline-pass': { key: 'test-token' },
   neuralwatt: { key: 'test-token' },
   'opencode-go': { key: 'test-token' },
   openrouter: { key: 'test-token' },
@@ -35,7 +35,7 @@ const readAuthFileMock = (filePath: unknown): string => {
 ((fs as unknown) as { existsSync: () => boolean }).existsSync = () => true;
 ((fs as unknown) as { readFileSync: (filePath: unknown) => string }).readFileSync = readAuthFileMock;
 
-import { fetchHyperQuota, fetchOllamaCloudQuota, fetchQuotaForProvider } from './quotaProviders';
+import { fetchClinePassQuota, fetchHyperQuota, fetchOllamaCloudQuota, fetchQuotaForProvider } from './quotaProviders';
 import { validateCredential } from './quotaCredentials';
 
 type MockResponseInit = { ok?: boolean; status?: number };
@@ -297,50 +297,118 @@ describe('OpenRouter quota provider (VS Code parity)', () => {
   }
 });
 
+describe('ClinePass quota provider (VS Code parity)', () => {
+  // Live-verified response shape of
+  // GET https://api.cline.bot/api/v1/users/me/plan/usage-limits
+  const documentedPayload = {
+    data: {
+      limits: [
+        { type: 'five_hour', percentUsed: 43, resetsAt: '2026-09-08T17:00:44.598174595Z' },
+        { type: 'weekly', percentUsed: 17, resetsAt: '2026-09-13T17:00:44.598174595Z' },
+        { type: 'monthly', percentUsed: 8, resetsAt: '2026-10-01T00:00:00Z' },
+      ],
+    },
+    success: true,
+  };
 
-describe('Crof quota provider (VS Code parity)', () => {
-  test('reports credits balance as valueLabel with null percent', async () => {
-    stubFetchReturning(() => Promise.resolve(mockResponse({ usable_requests: 450, credits: 12.3456 })));
+  test('maps documented limit kinds to 5h/weekly/monthly windows', async () => {
+    stubFetchReturning(() => Promise.resolve(mockResponse(documentedPayload)));
 
-    const result = await fetchQuotaForProvider('crof');
+    const result = await fetchQuotaForProvider('cline-pass');
 
     assert.equal(result.ok, true);
-    assert.equal(result.providerId, 'crof');
-    assert.equal(result.usage!.windows.credits!.usedPercent, null);
-    assert.equal(result.usage!.windows.credits!.valueLabel, '$12.35');
+    assert.equal(result.providerId, 'cline-pass');
+    assert.equal(result.usage?.windows['5h']?.usedPercent, 43);
+    assert.equal(result.usage?.windows['5h']?.windowSeconds, 18_000);
+    assert.equal(result.usage?.windows['5h']?.resetAt, Date.parse('2026-09-08T17:00:44.598174595Z'));
+    assert.equal(result.usage?.windows.weekly?.usedPercent, 17);
+    assert.equal(result.usage?.windows.weekly?.windowSeconds, 604_800);
+    assert.equal(result.usage?.windows.monthly?.usedPercent, 8);
+    assert.equal(result.usage?.windows.monthly?.windowSeconds, null);
   });
 
-  test('tolerates missing credits field', async () => {
-    stubFetchReturning(() => Promise.resolve(mockResponse({ usable_requests: 0 })));
+  test('ignores unknown limit types and rejects responses without quota data', async () => {
+    stubFetchReturning(() => Promise.resolve(mockResponse({ data: { limits: [{ type: 'quarterly', percentUsed: 5 }] } })));
 
-    const result = await fetchQuotaForProvider('crof');
-
-    assert.equal(result.ok, true);
-    assert.equal(result.usage!.windows.credits!.valueLabel, undefined);
-    assert.equal(result.usage!.windows.credits!.usedPercent, null);
-  });
-
-  test('maps 401 to session-expired with CrofAI branding', async () => {
-    stubFetchFailing(async () => ({}), { ok: false, status: 401 });
-
-    const result = await fetchQuotaForProvider('crof');
+    const result = await fetchQuotaForProvider('cline-pass');
 
     assert.equal(result.ok, false);
     assert.equal(result.configured, true);
-    assert.equal(result.error, 'Session expired — please re-authenticate with CrofAI');
+    assert.equal(result.usage, null);
+    assert.equal(result.error, 'No quota data in response');
+  });
+
+  test('maps 401 to session-expired with ClinePass branding', async () => {
+    stubFetchFailing(async () => ({}), { ok: false, status: 401 });
+
+    const result = await fetchQuotaForProvider('cline-pass');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.configured, true);
+    assert.equal(result.error, 'Session expired — please re-authenticate with ClinePass');
   });
 
   test('reports invalid-response on JSON parse failure', async () => {
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      json: async () => { throw new SyntaxError('Unexpected token'); },
-    }) as unknown as Response) as typeof fetch;
+    stubFetchFailing(async () => { throw new SyntaxError('Unexpected token'); }, { ok: true, status: 200 });
 
-    const result = await fetchQuotaForProvider('crof');
+    const result = await fetchQuotaForProvider('cline-pass');
 
     assert.equal(result.ok, false);
     assert.equal(result.error, 'Invalid response from provider');
+  });
+
+  const readAuth = () => ({ 'cline-pass': { key: 'test-token' } });
+
+  for (const limit of [
+    { type: 'constructor', percentUsed: 5 }, { type: 'toString', percentUsed: 5 },
+    { type: '__proto__', percentUsed: 5 }, { type: 'weekly', percentUsed: '' },
+    { type: 'weekly', percentUsed: ' ' }, { type: 'weekly', percentUsed: true },
+    { type: 'weekly', percentUsed: null }, null,
+  ]) {
+    test(`skips malformed windows independently: ${JSON.stringify(limit)}`, async () => {
+      const invalid = await fetchClinePassQuota({ readAuth, fetchImpl: async () => Response.json({ data: { limits: [limit] } }) });
+      assert.equal(invalid.ok, false);
+      assert.equal(invalid.usage, null);
+      const mixed = await fetchClinePassQuota({ readAuth, fetchImpl: async () => Response.json({ data: { limits: [limit, { type: 'monthly', percentUsed: 8 }] } }) });
+      assert.equal(mixed.ok, true);
+      assert.ok(mixed.usage);
+      assert.deepEqual(Object.keys(mixed.usage.windows), ['monthly']);
+    });
+  }
+
+  for (const percentUsed of [0, '0', '51']) {
+    test(`accepts percentage ${JSON.stringify(percentUsed)}`, async () => {
+      const result = await fetchClinePassQuota({ readAuth, fetchImpl: async () => Response.json({ data: { limits: [{ type: 'weekly', percentUsed }] } }) });
+      assert.equal(result.ok, true);
+      assert.equal(result.usage?.windows.weekly?.usedPercent, Number(percentUsed));
+    });
+  }
+
+  for (const entry of [{ key: '' }, { key: ' ' }, { key: 42 }, {}]) {
+    test(`falls back to a usable token: ${JSON.stringify(entry)}`, async () => {
+      const result = await fetchClinePassQuota({
+        readAuth: () => ({ 'cline-pass': { ...entry, token: 'test-token' } }),
+        fetchImpl: async (_url, options) => {
+          assert.equal(new Headers(options.headers).get('Authorization'), 'Bearer test-token');
+          return Response.json(documentedPayload);
+        },
+      });
+      assert.equal(result.ok, true);
+    });
+  }
+
+  test('does not request usage without usable credentials', async () => {
+    const result = await fetchClinePassQuota({ readAuth: () => ({ 'cline-pass': { key: 42 } }), fetchImpl: async () => { throw new Error('Unexpected fetch'); } });
+    assert.equal(result.configured, false);
+    assert.equal(result.error, 'Not configured');
+  });
+
+  test('recognizes the timeout exception from AbortSignal.timeout', async () => {
+    const result = await fetchClinePassQuota({ readAuth, fetchImpl: async () => { throw new DOMException('Timed out', 'TimeoutError'); } });
+    assert.equal(result.ok, false);
+    assert.equal(result.configured, true);
+    assert.equal(result.usage, null);
+    assert.equal(result.error, 'Request timed out');
   });
 });
 

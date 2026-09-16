@@ -14,8 +14,11 @@ import { ElectronSshManager } from './ssh-manager.mjs';
 import { replaceFileWithRetry } from './windows-file-replace.mjs';
 import { createTrayController } from './tray.mjs';
 import { resolveManagedOpenCodeCwd } from './opencode-cwd.mjs';
+import { stopEmbeddedServer } from './server-shutdown.mjs';
 import { resolveStartupUrlProbePlan, shouldIgnoreLoopbackConnectionLimit } from './startup-url-selection.mjs';
 import { sanitizeRuntimeRequestHeaders } from './runtime-request-headers.mjs';
+import { probeDirectHostWithRetry } from './host-probe-policy.mjs';
+import { probeElectronHostWithDeadline } from './electron-host-probe.mjs';
 import { assertUpdaterCapability } from './updater-capability.mjs';
 import { checkForDesktopUpdate } from './updater-check.mjs';
 import { resolveUpdaterChannel } from './updater-channel.mjs';
@@ -256,6 +259,7 @@ const { autoUpdater } = updaterPkg;
 const state = {
   serverHandle: null,
   sidecarUrl: null,
+  localUiUrl: null,
   localOrigin: null,
   apiBaseUrl: null,
   clientToken: null,
@@ -269,6 +273,7 @@ const state = {
   quitInProgress: false,
   quitConfirmationPending: false,
   backgroundShutdownComplete: false,
+  backgroundShutdownPromise: null,
   sshShutdownPromise: null,
   installingUpdate: false,
   pendingUpdate: null,
@@ -361,14 +366,13 @@ const quitConfirmationMessage = () => {
 };
 
 const shutdownBackgroundServices = () => {
-  if (state.backgroundShutdownComplete) return;
-  state.backgroundShutdownComplete = true;
-  setDesktopKeepAwakeActive(false);
-  if (state.installingUpdate) return;
-  killSidecar();
-  setImmediate(() => {
-    void shutdownSshSessions();
-  });
+  if (!state.backgroundShutdownPromise) {
+    setDesktopKeepAwakeActive(false);
+    state.backgroundShutdownPromise = Promise.all([killSidecar(), shutdownSshSessions()]).finally(() => {
+      state.backgroundShutdownComplete = true;
+    });
+  }
+  return state.backgroundShutdownPromise;
 };
 
 const shutdownSshSessions = async () => {
@@ -386,10 +390,10 @@ const shutdownSshSessions = async () => {
   await state.sshShutdownPromise;
 };
 
-const prepareForQuit = ({ installingUpdate = false } = {}) => {
+const prepareForQuit = () => {
   state.quitRequested = true;
   state.quitConfirmed = true;
-  state.installingUpdate = installingUpdate;
+  state.installingUpdate = false;
   state.quitConfirmationPending = false;
 
   if (state.trayController) {
@@ -413,20 +417,21 @@ const prepareForQuit = ({ installingUpdate = false } = {}) => {
 
   setDesktopKeepAwakeActive(false);
 
-  if (installingUpdate) {
-    state.backgroundShutdownComplete = true;
-    return;
-  }
-
-  shutdownBackgroundServices();
+  return shutdownBackgroundServices();
 };
 
-const performConfirmedQuit = () => {
+const performConfirmedQuit = async ({ relaunch = false } = {}) => {
   if (state.quitInProgress) return;
   state.quitInProgress = true;
 
-  prepareForQuit();
-  app.exit(0);
+  try {
+    await prepareForQuit();
+  } catch (error) {
+    log.warn('[electron] background shutdown failed:', error);
+  } finally {
+    if (relaunch) app.relaunch();
+    app.exit(0);
+  }
 };
 
 // Hard-stop signals (`Ctrl+C` on `electron:dev`, an external `kill`/SIGTERM,
@@ -436,12 +441,7 @@ const performConfirmedQuit = () => {
 // reaper remains the backstop for an unhandled hard crash (SIGKILL).
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
-    try {
-      shutdownBackgroundServices();
-    } catch (error) {
-      log.warn(`[electron] ${signal} shutdown failed:`, error);
-    }
-    app.exit(0);
+    void performConfirmedQuit();
   });
 }
 
@@ -935,123 +935,16 @@ const buildHealthUrl = (url) => {
   }
 };
 
-const buildVersionUrl = (url) => {
-  try {
-    const parsed = new URL(url);
-    parsed.pathname = `${parsed.pathname.replace(/\/$/, '') || ''}/api/version`;
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-};
-
-const buildSessionStatusUrl = (url) => {
-  try {
-    const parsed = new URL(url);
-    parsed.pathname = `${parsed.pathname.replace(/\/$/, '') || ''}/auth/session`;
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-};
-
-const classifyVersionPayload = (payload) => {
-  const compatibility = payload?.compatibility;
-  if (!payload || payload.status !== 'ok' || !compatibility || typeof compatibility !== 'object') {
-    return 'wrong-service';
-  }
-
-  if (!Array.isArray(compatibility.capabilities) || !compatibility.capabilities.includes('api.runtime-url.v1')) {
-    return 'incompatible';
-  }
-
-  if (compatibility.apiVersion !== 1 || compatibility.minClientApiVersion > 1) {
-    return 'update-recommended';
-  }
-
-  return 'ok';
-};
-
-const fetchVersionPayload = async (versionUrl, { headers, timeoutMs }) => {
-  const timeoutSignal = AbortSignal.timeout(timeoutMs);
-  try {
-    return await fetch(versionUrl, { signal: timeoutSignal, headers });
-  } catch (error) {
-    if (timeoutSignal.aborted) {
-      throw error;
-    }
-    return await Promise.race([
-      electronNet.fetch(versionUrl, { headers }),
-      new Promise((_, reject) => setTimeout(() => reject(error), timeoutMs)),
-    ]);
-  }
-};
-
 const probeHostWithTimeout = async (url, timeoutMs, clientToken = '', requestHeaders = {}, expectedServerId = '') => {
-  const versionUrl = buildVersionUrl(url);
-  const sessionStatusUrl = buildSessionStatusUrl(url);
-  if (!versionUrl || !sessionStatusUrl) {
-    throw new Error('Invalid URL');
-  }
-
-  const started = Date.now();
-
-  // Identity gate for learned/untrusted addresses: verify the UNAUTHENTICATED
-  // /health identity before the token-carrying version fetch, so the bearer
-  // token is never sent to a re-assigned address that now belongs to a
-  // different machine. Older servers omit serverId from /health; only an
-  // explicit mismatch rejects.
-  if (typeof expectedServerId === 'string' && expectedServerId.trim()) {
-    const healthUrl = buildHealthUrl(url);
-    if (healthUrl) {
-      try {
-        const response = await fetch(healthUrl, { signal: AbortSignal.timeout(timeoutMs), headers: { Accept: 'application/json' } });
-        if (response.ok) {
-          const payload = await response.json().catch(() => null);
-          const reported = typeof payload?.serverId === 'string' ? payload.serverId.trim() : '';
-          if (reported && reported !== expectedServerId.trim()) {
-            return { status: 'wrong-service', latencyMs: Date.now() - started };
-          }
-        }
-      } catch {
-        // Unreachable/timeout surfaces in the version fetch below.
-      }
-    }
-  }
-
-  try {
-    const headers = { ...sanitizeRuntimeRequestHeaders(requestHeaders), Accept: 'application/json' };
-    const token = typeof clientToken === 'string' ? clientToken.trim() : '';
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    const response = await fetchVersionPayload(versionUrl, { headers, timeoutMs });
-    const status = response.status;
-    if (status === 401 || status === 403) {
-      return { status: 'auth', latencyMs: Date.now() - started };
-    }
-    if (status < 200 || status >= 300) {
-      return { status: 'unreachable', latencyMs: Date.now() - started };
-    }
-    const payload = await response.json().catch(() => null);
-    const versionStatus = classifyVersionPayload(payload);
-    if (versionStatus !== 'ok') {
-      return { status: versionStatus, latencyMs: Date.now() - started };
-    }
-    const sessionResponse = await fetchVersionPayload(sessionStatusUrl, { headers, timeoutMs });
-    if (sessionResponse.status === 401 || sessionResponse.status === 403) {
-      return { status: 'auth', latencyMs: Date.now() - started };
-    }
-    if (!sessionResponse.ok) {
-      return { status: 'unreachable', latencyMs: Date.now() - started };
-    }
-    return {
-      status: versionStatus,
-      latencyMs: Date.now() - started,
-    };
-  } catch {
-    return { status: 'unreachable', latencyMs: Date.now() - started };
-  }
+  return probeElectronHostWithDeadline({
+    url,
+    timeoutMs,
+    clientToken,
+    requestHeaders,
+    expectedServerId,
+    chromiumFetch: (requestUrl, options) => electronNet.fetch(requestUrl, options),
+    isReady: () => app.isReady(),
+  });
 };
 
 const resolveStoredClientTokenForUrl = (targetUrl, config = readDesktopHostsConfig()) => {
@@ -1730,17 +1623,16 @@ Stop-ProcessTree $targetPid $true
   child.unref();
 };
 
-const killSidecar = () => {
+const killSidecar = async () => {
   const handle = state.serverHandle;
   state.serverHandle = null;
   state.sidecarUrl = null;
   if (!handle) return;
 
-  try {
-    launchDetachedOpenCodeKiller(handle.getOpenCodeProcessInfo?.());
-  } catch (error) {
-    log.warn('[electron] failed to launch OpenCode killer:', error);
-  }
+  await stopEmbeddedServer(handle, {
+    launchFallback: launchDetachedOpenCodeKiller,
+    warn: (error) => log.warn('[electron] embedded server shutdown failed:', error),
+  });
 };
 
 const macosMajorVersion = () => {
@@ -2413,6 +2305,13 @@ const getMenuTargetWindow = () => {
 
 const dispatchMenuAction = (action) => {
   const target = getMenuTargetWindow();
+  // Zoom actions are consumed by the renderer's DOM listener. Sending them
+  // through both the IPC bridge and the DOM event would invoke the handler
+  // multiple times because preload fans the IPC event back into both paths.
+  if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') {
+    dispatchDomEventToWindow(target, 'openchamber:zoom', action);
+    return;
+  }
   emitToWindow(target, 'openchamber:menu-action', action);
   dispatchDomEventToWindow(target, 'openchamber:menu-action', action);
 };
@@ -2452,9 +2351,7 @@ const openDevToolsForMenuTarget = () => {
 };
 
 const relaunchFromMenu = () => {
-  prepareForQuit();
-  app.relaunch();
-  app.exit(0);
+  void performConfirmedQuit({ relaunch: true });
 };
 
 const nextWindowLabel = () => {
@@ -2853,7 +2750,7 @@ const createAdditionalWindow = async (url, runtimeConfig = {}) => {
 const buildMiniChatUrl = ({ mode, sessionId, directory, projectId }) => {
   const base = shouldUsePackagedUi()
     ? buildPackagedUiUrl('/mini-chat.html')
-    : state.localOrigin || state.sidecarUrl;
+    : state.localUiUrl || state.localOrigin || state.sidecarUrl;
   if (!base) {
     throw new Error('Local UI is not available');
   }
@@ -3068,6 +2965,7 @@ const resolveInitialUrl = async () => {
     : localUrl;
 
   state.sidecarUrl = localUrl;
+  state.localUiUrl = localUiUrl;
   const localAvailable = Boolean(localUrl);
 
   const localOrigin = localUrl ? new URL(localUrl).origin : null;
@@ -3248,9 +3146,9 @@ const installDownloadedUpdate = () => new Promise((resolve, reject) => {
 
   // Defer so the renderer's invoke channel is idle before the app starts
   // shutting down.
-  setImmediate(() => {
+  setImmediate(async () => {
     try {
-      killSidecar();
+      await shutdownBackgroundServices();
       autoUpdater.quitAndInstall();
     } catch (error) {
       fail(error);
@@ -4491,7 +4389,13 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       return getOrCreateDesktopInstallId();
 
     case 'desktop_host_probe':
-      return probeHostWithTimeout(String(args.url || ''), 2_000, String(args.clientToken || ''), args.requestHeaders || {}, String(args.expectedServerId || ''));
+      return probeDirectHostWithRetry((timeoutMs) => probeHostWithTimeout(
+        String(args.url || ''),
+        timeoutMs,
+        String(args.clientToken || ''),
+        args.requestHeaders || {},
+        String(args.expectedServerId || ''),
+      ));
 
     case 'desktop_remote_password_login':
       return loginRemoteAndIssueClientToken({
@@ -4661,13 +4565,7 @@ const handleInvoke = async (browserWindow, command, args = {}) => {
       // Without this, relaunch can race with the renderer's pending invoke and
       // the restart appears to do nothing from the UI side.
       setImmediate(() => {
-        try {
-          prepareForQuit();
-          app.relaunch();
-          app.exit(0);
-        } catch (err) {
-          log.error('[electron] desktop_restart failed', err);
-        }
+        void performConfirmedQuit({ relaunch: true });
       });
       return null;
     }
@@ -4963,6 +4861,10 @@ const buildMacMenu = () => {
         { role: 'minimize' },
         { role: 'zoom' },
         { type: 'separator' },
+        { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => dispatchAction('zoom-in') },
+        { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => dispatchAction('zoom-out') },
+        { label: 'Reset Zoom', accelerator: 'CmdOrCtrl+0', click: () => dispatchAction('zoom-reset') },
+        { type: 'separator' },
         { role: 'close' },
       ],
     },
@@ -5076,6 +4978,9 @@ const buildAutoHiddenMenu = () => {
       label: 'Window',
       submenu: [
         { role: 'minimize' },
+        { label: 'Zoom In', accelerator: 'Ctrl+=', click: () => dispatchAction('zoom-in') },
+        { label: 'Zoom Out', accelerator: 'Ctrl+-', click: () => dispatchAction('zoom-out') },
+        { label: 'Reset Zoom', accelerator: 'Ctrl+0', click: () => dispatchAction('zoom-reset') },
         { role: 'togglefullscreen' },
         { type: 'separator' },
         { role: 'close' },
