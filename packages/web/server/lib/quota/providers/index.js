@@ -171,7 +171,14 @@ const pendingFetches = new Map();
 
 export const listConfiguredQuotaProviders = () => {
   const configured = [];
-  const commands = readUsageProviderCommands();
+  let commands;
+  try {
+    commands = readUsageProviderCommands();
+  } catch {
+    // A malformed usage-providers.json must not erase every provider from the
+    // list; the fetch path reports the per-provider error instead.
+    commands = {};
+  }
 
   for (const [id, provider] of Object.entries(registry)) {
     try {
@@ -222,7 +229,13 @@ const fetchQuotaForProviderUncoalesced = async (providerId, options = {}) => {
 };
 
 export const fetchQuotaForProvider = (providerId, options = {}) => {
-  const command = registry[providerId] ? readUsageProviderCommand(providerId) : null;
+  let command = null;
+  try {
+    command = registry[providerId] ? readUsageProviderCommand(providerId) : null;
+  } catch {
+    // Let the uncoalesced fetch below surface the config error as a
+    // per-provider result; built-in providers must keep working.
+  }
   const fetchKey = command ? `${providerId}\0${options.directory ?? ''}` : providerId;
   const existing = pendingFetches.get(fetchKey);
   if (existing) return existing;

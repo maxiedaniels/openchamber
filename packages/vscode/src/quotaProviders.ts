@@ -210,6 +210,7 @@ const AUTH_FILE = path.join(OPENCODE_DATA_DIR, 'auth.json');
 const SUPPORTED_QUOTA_PROVIDERS = new Set([
   'claude',
   'codex',
+  'cline-pass',
   'github-copilot',
   'github-copilot-addon',
   'google',
@@ -225,7 +226,6 @@ const SUPPORTED_QUOTA_PROVIDERS = new Set([
   'wafer',
   'opencode-go',
   'cursor',
-  'crof',
   'deepseek',
   'hyper',
   'neuralwatt',
@@ -808,7 +808,15 @@ export const listConfiguredQuotaProviders = () => {
     // Managed credentials remain enumerable; unreadable auth cannot establish xAI configuration.
   }
   const configured = new Set<string>();
-  for (const providerId of Object.keys(readUsageProviderCommands())) {
+  let commandOverrides: Record<string, string[]>;
+  try {
+    commandOverrides = readUsageProviderCommands();
+  } catch {
+    // A malformed usage-providers.json must not erase every provider from the
+    // list; the fetch path reports the per-provider error instead.
+    commandOverrides = {};
+  }
+  for (const providerId of Object.keys(commandOverrides)) {
     if (SUPPORTED_QUOTA_PROVIDERS.has(providerId)) configured.add(providerId);
   }
   const openCodeGoAuth = normalizeAuthEntry(getAuthEntry(auth, ['opencode-go']));
@@ -3163,14 +3171,30 @@ const fetchQuotaForProviderUncoalesced = async (providerId: string): Promise<Pro
 const pendingQuotaFetches = new Map<string, Promise<ProviderResult>>();
 
 export const fetchQuotaForProvider = (providerId: string, directory?: string): Promise<ProviderResult> => {
-  const command = SUPPORTED_QUOTA_PROVIDERS.has(providerId)
-    ? readUsageProviderCommands()[providerId]
-    : undefined;
+  let command: string[] | undefined;
+  let configError: Error | null = null;
+  if (SUPPORTED_QUOTA_PROVIDERS.has(providerId)) {
+    try {
+      command = readUsageProviderCommands()[providerId];
+    } catch (error) {
+      configError = error instanceof Error ? error : new Error('Usage provider config is invalid');
+    }
+  }
   const fetchKey = command ? `${providerId}\0${directory ?? ''}` : providerId;
   const existing = pendingQuotaFetches.get(fetchKey);
   if (existing) return existing;
 
-  const pending = (command
+  const pending = (configError
+    // A malformed config file is a per-provider failure, not a server-wide
+    // one: built-in providers keep working and the error names the file.
+    ? Promise.resolve(buildResult({
+      providerId,
+      providerName: providerId,
+      ok: false,
+      configured: true,
+      error: configError.message,
+    }))
+    : command
     ? fetchCommandQuota(providerId, command, directory).catch((error) => buildResult({
       providerId,
       providerName: providerId,

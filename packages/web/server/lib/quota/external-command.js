@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { buildResult, formatMoney, resolveWindowLabel, toUsageWindow } from './utils/index.js';
 
-const CONFIG_FILE = path.join(
+const configFilePath = () => path.join(
   process.env.OPENCHAMBER_DATA_DIR
     ? path.resolve(process.env.OPENCHAMBER_DATA_DIR)
     : path.join(os.homedir(), '.config', 'openchamber'),
@@ -26,11 +26,12 @@ export const parseUsageProviderCommands = (config) => {
 };
 
 export const readUsageProviderCommands = () => {
+  const configFile = configFilePath();
   try {
-    return parseUsageProviderCommands(JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')));
+    return parseUsageProviderCommands(JSON.parse(fs.readFileSync(configFile, 'utf8')));
   } catch (error) {
     if (error?.code === 'ENOENT') return {};
-    throw new Error('Usage provider config is invalid', { cause: error });
+    throw new Error(`Usage provider config is invalid: ${configFile}`, { cause: error });
   }
 };
 

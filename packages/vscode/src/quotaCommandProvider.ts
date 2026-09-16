@@ -14,7 +14,7 @@ type UsageWindow = {
   valueLabel?: string;
 };
 
-const CONFIG_FILE = path.join(
+const configFilePath = () => path.join(
   process.env.OPENCHAMBER_DATA_DIR
     ? path.resolve(process.env.OPENCHAMBER_DATA_DIR)
     : path.join(os.homedir(), '.config', 'openchamber'),
@@ -22,8 +22,9 @@ const CONFIG_FILE = path.join(
 );
 
 export const readUsageProviderCommands = (): Record<string, string[]> => {
+  const configFile = configFilePath();
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) as Record<string, unknown>;
+    const config = JSON.parse(fs.readFileSync(configFile, 'utf8')) as Record<string, unknown>;
     const commands = config?.commands;
     if (config?.version !== 1 || !commands || typeof commands !== 'object' || Array.isArray(commands)) {
       throw new Error('Usage provider config is invalid');
@@ -36,7 +37,7 @@ export const readUsageProviderCommands = (): Record<string, string[]> => {
     return Object.fromEntries(entries) as Record<string, string[]>;
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return {};
-    throw new Error('Usage provider config is invalid', { cause: error });
+    throw new Error(`Usage provider config is invalid: ${configFile}`, { cause: error });
   }
 };
 

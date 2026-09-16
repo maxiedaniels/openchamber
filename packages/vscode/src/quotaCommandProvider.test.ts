@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
-import { fetchCommandQuota } from './quotaCommandProvider';
+import { fetchCommandQuota, readUsageProviderCommands } from './quotaCommandProvider';
 
 describe('command-backed quota provider', () => {
   it('maps account usage and uses the requested working directory', async () => {
@@ -20,5 +21,19 @@ describe('command-backed quota provider', () => {
       fetchCommandQuota('codex', [process.execPath, '-e', 'console.error("secret"); process.exit(1)']),
       /Usage command failed/,
     );
+  });
+
+  it('names the config file when the config is malformed', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-config-'));
+    fs.writeFileSync(path.join(directory, 'usage-providers.json'), '{ broken');
+    const previousDataDir = process.env.OPENCHAMBER_DATA_DIR;
+    process.env.OPENCHAMBER_DATA_DIR = directory;
+    try {
+      assert.throws(() => readUsageProviderCommands(), /usage-providers\.json/);
+    } finally {
+      if (previousDataDir === undefined) delete process.env.OPENCHAMBER_DATA_DIR;
+      else process.env.OPENCHAMBER_DATA_DIR = previousDataDir;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

@@ -22,6 +22,17 @@ const quotaRequests = new Map<QuotaProviderId, { controller: AbortController; pr
 let quotaAutoRefreshConsumers = 0;
 let quotaAutoRefreshInterval: number | null = null;
 
+/** The directory quota requests are scoped to: the active session's
+    authoritative worktree directory when a session is open, otherwise the
+    app's current directory. One owner keeps fetch and refresh-trigger
+    resolution in step. */
+export const resolveQuotaDirectory = (): string | null => {
+  const sessionState = useSessionUIStore.getState();
+  return sessionState.currentSessionId
+    ? sessionState.getDirectoryForSession(sessionState.currentSessionId)
+    : useDirectoryStore.getState().currentDirectory;
+};
+
 interface QuotaSettingsState {
   displayMode: 'usage' | 'remaining';
   dropdownProviderIds: QuotaProviderId[];
@@ -154,10 +165,7 @@ export const useQuotaStore = create<QuotaStore>()(
         const controller = new AbortController();
         const promise = Promise.resolve().then(async () => {
           try {
-            const sessionState = useSessionUIStore.getState();
-            const directory = sessionState.currentSessionId
-              ? sessionState.getDirectoryForSession(sessionState.currentSessionId)
-              : useDirectoryStore.getState().currentDirectory;
+            const directory = resolveQuotaDirectory();
             const result = await fetchQuota(providerId, {
               signal: controller.signal,
               directory: directory ?? undefined,
@@ -338,4 +346,23 @@ export const useQuotaAutoRefresh = () => {
       }
     };
   }, []);
+
+  // Command-backed usage can be directory-specific, so a session or worktree
+  // switch must not wait up to the next interval tick to see the new
+  // directory's sample. The store's per-provider request sharing keeps this
+  // from racing the interval.
+  const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
+  const getDirectoryForSession = useSessionUIStore((state) => state.getDirectoryForSession);
+  const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
+  const resolvedDirectory = currentSessionId
+    ? getDirectoryForSession(currentSessionId)
+    : currentDirectory;
+
+  const lastDirectoryRef = React.useRef(resolvedDirectory);
+  React.useEffect(() => {
+    if (lastDirectoryRef.current === resolvedDirectory) return;
+    lastDirectoryRef.current = resolvedDirectory;
+    const { dropdownProviderIds, fetchQuotas } = useQuotaStore.getState();
+    if (dropdownProviderIds.length > 0) void fetchQuotas(dropdownProviderIds);
+  }, [resolvedDirectory]);
 };
