@@ -141,9 +141,9 @@ type WaferPayload = {
   plan_tier?: string;
 };
 
-type CrofPayload = {
-  usable_requests?: number | null;
-  credits?: number | string;
+type ClineWindowKind = {
+  key: string;
+  windowSeconds: number | null;
 };
 
 type DeepseekPayload = {
@@ -839,9 +839,9 @@ export const listConfiguredQuotaProviders = () => {
     configured.add('wafer');
   }
 
-  const crofAuth = normalizeAuthEntry(getAuthEntry(auth, ['crof']));
-  if (crofAuth && ((crofAuth as Record<string, unknown>).key || (crofAuth as Record<string, unknown>).token)) {
-    configured.add('crof');
+  const clineAuth = normalizeAuthEntry(getAuthEntry(auth, ['cline-pass']));
+  if (clineAuth && (asNonEmptyString(clineAuth.key) || asNonEmptyString(clineAuth.token))) {
+    configured.add('cline-pass');
   }
 
   const neuralwattAuth = normalizeAuthEntry(getAuthEntry(auth, ['neuralwatt']));
@@ -2667,17 +2667,31 @@ const fetchNeuralwattQuota = async (): Promise<ProviderResult> => {
   }
 };
 
-const CROF_USAGE_URL = 'https://crof.ai/usage_api/';
+const CLINE_PASS_USAGE_URL = 'https://api.cline.bot/api/v1/users/me/plan/usage-limits';
 
-const fetchCrofQuota = async (): Promise<ProviderResult> => {
-  const auth = readAuthFile();
-  const entry = normalizeAuthEntry(getAuthEntry(auth, ['crof'])) as Record<string, unknown> | null;
-  const apiKey = (entry?.key as string | undefined) ?? (entry?.token as string | undefined);
+// Cline reports a rolling five-hour window, a rolling weekly window, and a
+// calendar-month limit. Each window carries its duration so consumers can rank
+// limits by how soon they run out; the calendar month has no fixed duration.
+const CLINE_WINDOW_KINDS = new Map<string, ClineWindowKind>([
+  ['five_hour', { key: '5h', windowSeconds: 5 * 60 * 60 }],
+  ['weekly', { key: 'weekly', windowSeconds: 7 * 24 * 60 * 60 }],
+  ['monthly', { key: 'monthly', windowSeconds: null }],
+]);
+
+type ClineQuotaDependencies = {
+  readAuth?: () => AuthFile;
+  fetchImpl?: (url: string, options: RequestInit) => Promise<Response>;
+};
+
+export const fetchClinePassQuota = async ({ readAuth = readAuthFile, fetchImpl = fetch }: ClineQuotaDependencies = {}): Promise<ProviderResult> => {
+  const auth = readAuth();
+  const entry = normalizeAuthEntry(getAuthEntry(auth, ['cline-pass']));
+  const apiKey = asNonEmptyString(entry?.key) ?? asNonEmptyString(entry?.token);
 
   if (!apiKey) {
     return buildResult({
-      providerId: 'crof',
-      providerName: 'CrofAI',
+      providerId: 'cline-pass',
+      providerName: 'ClinePass',
       ok: false,
       configured: false,
       error: 'Not configured',
@@ -2687,7 +2701,7 @@ const fetchCrofQuota = async (): Promise<ProviderResult> => {
   const timeoutSignal = AbortSignal.timeout(15_000);
 
   try {
-    const response = await fetch(CROF_USAGE_URL, {
+    const response = await fetchImpl(CLINE_PASS_USAGE_URL, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -2698,42 +2712,62 @@ const fetchCrofQuota = async (): Promise<ProviderResult> => {
 
     if (!response.ok) {
       return buildResult({
-        providerId: 'crof',
-        providerName: 'CrofAI',
+        providerId: 'cline-pass',
+        providerName: 'ClinePass',
         ok: false,
         configured: true,
         error: response.status === 401
-          ? 'Session expired — please re-authenticate with CrofAI'
+          ? 'Session expired — please re-authenticate with ClinePass'
           : `API error: ${response.status}`,
       });
     }
 
-    const payload = await response.json() as CrofPayload;
-    const credits = toNumber(payload?.credits);
-    const valueLabel = credits !== null ? `$${formatMoney(credits)}` : null;
+    const payload = asObject(await response.json());
+    const data = asObject(payload?.data);
+    const limits = Array.isArray(data?.limits) ? data.limits : [];
 
-    const windows: Record<string, UsageWindow> = {
-      credits: toUsageWindow({
-        usedPercent: null,
-        windowSeconds: null,
-        resetAt: null,
-        valueLabel,
-      }),
-    };
+    const windows: Record<string, UsageWindow> = {};
+    for (const item of limits) {
+      const limit = asObject(item);
+      if (!limit) continue;
+      const limitType = asNonEmptyString(limit.type);
+      const kind = limitType === null ? undefined : CLINE_WINDOW_KINDS.get(limitType);
+      if (!kind) continue;
+      const usedPercent = toNumber(asNonEmptyString(limit.percentUsed)
+        ?? (Number.isFinite(limit.percentUsed) ? limit.percentUsed : null));
+      if (usedPercent === null) continue;
+      windows[kind.key] = toUsageWindow({
+        usedPercent,
+        windowSeconds: kind.windowSeconds,
+        resetAt: toTimestamp(limit.resetsAt),
+      });
+    }
+
+    if (Object.keys(windows).length === 0) {
+      return buildResult({
+        providerId: 'cline-pass',
+        providerName: 'ClinePass',
+        ok: false,
+        configured: true,
+        error: 'No quota data in response',
+      });
+    }
 
     return buildResult({
-      providerId: 'crof',
-      providerName: 'CrofAI',
+      providerId: 'cline-pass',
+      providerName: 'ClinePass',
       ok: true,
       configured: true,
       usage: { windows },
     });
   } catch (error) {
-    const isTimeout = error instanceof DOMException && error.name === 'AbortError' && timeoutSignal.aborted;
+    const isTimeout = error instanceof DOMException && (
+      error.name === 'TimeoutError' || (error.name === 'AbortError' && timeoutSignal.aborted)
+    );
     const isParseError = error instanceof SyntaxError;
     return buildResult({
-      providerId: 'crof',
-      providerName: 'CrofAI',
+      providerId: 'cline-pass',
+      providerName: 'ClinePass',
       ok: false,
       configured: true,
       error: isTimeout
@@ -3066,8 +3100,8 @@ const fetchQuotaForProviderUncoalesced = async (providerId: string): Promise<Pro
     }
     case 'cursor':
       return fetchCursorQuota();
-    case 'crof':
-      return fetchCrofQuota();
+    case 'cline-pass':
+      return fetchClinePassQuota();
     case 'deepseek':
       return fetchDeepseekQuota();
     case 'hyper':

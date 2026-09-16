@@ -324,6 +324,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
 }) => {
     const { t } = useI18n();
     const { isReady, isUnavailable } = useOpenCodeReadiness();
+    const { isReady: canSelectAgent } = useOpenCodeReadiness('agents');
     const readinessLabel = isUnavailable ? t('common.unavailable') : t('common.loading');
     const providers = useConfigStore((state) => state.providers);
     const currentProviderId = useConfigStore((state) => selection ? selection.model?.providerId ?? '' : state.currentProviderId);
@@ -341,6 +342,11 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const currentAgentName = useConfigStore((state) => selection ? selection.agent : state.currentAgentName);
     const settingsDefaultVariant = useConfigStore((state) => state.settingsDefaultVariant);
     const settingsDefaultAgent = useConfigStore((state) => state.settingsDefaultAgent);
+    const defaultsLoaded = useConfigStore((state) => state.settingsDefaultsLoaded);
+    const agentsResolved = useConfigStore((state) => state.agentsLoaded);
+    const providersResolved = useConfigStore((state) => state.providersLoaded);
+    const modelSelectionReady = Boolean(currentModelId) || (selection ? isReady : defaultsLoaded && providersResolved && agentsResolved);
+    const agentSelectionReady = Boolean(currentAgentName) || (selection ? canSelectAgent : defaultsLoaded && agentsResolved);
     const setProvider = useConfigStore((state) => state.setProvider);
     const setSelectedProvider = useConfigStore((state) => state.setSelectedProvider);
     const setModel = useConfigStore((state) => state.setModel);
@@ -569,6 +575,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const sizeVariant: 'mobile' | 'vscode' | 'default' = isMobile ? 'mobile' : isVSCodeRuntime ? 'vscode' : 'default';
     const buttonHeight = sizeVariant === 'mobile' ? 'h-9' : sizeVariant === 'vscode' ? 'h-6' : 'h-8';
     const controlIconSize = sizeVariant === 'mobile' ? 'size-5' : sizeVariant === 'vscode' ? 'size-4' : 'size-4';
+    const providerLogoSize = sizeVariant === 'mobile' ? 'size-[21px]' : 'size-[17px]';
     const controlTextSize = isCompact ? 'typography-micro' : 'typography-meta';
     const inlineGapClass = sizeVariant === 'mobile' ? 'gap-x-1' : sizeVariant === 'vscode' ? 'gap-x-2' : 'gap-x-3';
 
@@ -898,7 +905,9 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                 );
             }
             latestLoadedUserChoiceRestoreRef.current = restoreKey;
-            restoredSessionSelectionRef.current = currentSessionId;
+            // The saved-selections effect must still get its one-time run so the
+            // persisted session agent is applied via setAgent; only the model
+            // was restored here.
             return;
         }
 
@@ -1183,11 +1192,9 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
 
     React.useEffect(() => {
         if (selection) return;
-        if (!contextHydrated || !currentAgentName) {
-            manualVariantSelectionRef.current = false;
-            setCurrentVariant(undefined);
-            return;
-        }
+        // Missing discovery/context data cannot invalidate a configured effort.
+        // Clearing it here also marks the automatic draft selection as manual.
+        if (!contextHydrated || !currentAgentName || (currentModelId && !currentModelForMetadata)) return;
 
         if (!currentProviderId || !currentModelId) {
             manualVariantSelectionRef.current = false;
@@ -1237,6 +1244,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         manualVariantSelectionRef.current = false;
     }, [
         availableVariants,
+        currentModelForMetadata,
         contextHydrated,
         currentSessionId,
         currentAgentName,
@@ -1377,7 +1385,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         if (!uiAgentName) {
             const buildAgent = primaryAgents.find(agent => agent.name === 'build');
             const defaultAgent = buildAgent || primaryAgents[0];
-            return defaultAgent ? capitalizeAgentName(defaultAgent.name) : 'Select Agent';
+            return defaultAgent ? capitalizeAgentName(defaultAgent.name) : t('chat.modelControls.selectAgent');
         }
         const agent = agents.find(a => a.name === uiAgentName);
         return agent ? capitalizeAgentName(agent.name) : capitalizeAgentName(uiAgentName);
@@ -2372,11 +2380,11 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                             <DropdownMenuTrigger asChild>
                                 <div
                                     className={cn(
-                                        'model-controls__model-trigger flex items-center gap-1.5 cursor-pointer hover:bg-transparent hover:opacity-70 min-w-0',
+                                        'model-controls__model-trigger flex items-center gap-1.5 cursor-pointer select-none hover:bg-transparent hover:opacity-70 min-w-0',
                                         buttonHeight
                                     )}
                                 >
-                                    {!isReady ? (
+                                    {!modelSelectionReady ? (
                                         <>
                                             <Icon name="loader-4" className={cn(controlIconSize, 'animate-spin text-muted-foreground flex-shrink-0')} />
                                             <span className={cn(
@@ -2389,16 +2397,18 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                         </>
                                     ) : currentProviderId ? (
                                         <>
+                                            {/* Provider logos read smaller than the sprite icons
+                                                beside them at the same box size, so they get a step up. */}
                                             <ProviderLogo
                                                 providerId={currentProviderId}
-                                                className={cn(controlIconSize, 'flex-shrink-0')}
+                                                className={cn(providerLogoSize, 'flex-shrink-0')}
                                             />
                                             <Icon name="pencil-ai" className={cn(controlIconSize, 'text-primary/60 hidden')} />
                                         </>
                                     ) : (
                                         <Icon name="pencil-ai" className={cn(controlIconSize, 'text-muted-foreground')} />
                                     )}
-                                    {isReady && (
+                                    {modelSelectionReady && (
                                         <span
                                             ref={modelLabelRef}
                                             key={`${currentProviderId}-${currentModelId}`}
@@ -2500,7 +2510,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                             buttonHeight
                         )}
                     >
-                        {!isReady ? (
+                        {!modelSelectionReady ? (
                             <>
                                 <Icon name="loader-4" className={cn(controlIconSize, 'animate-spin text-muted-foreground flex-shrink-0')} />
                                 <span className="typography-micro font-medium text-muted-foreground min-w-0">
@@ -2709,7 +2719,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                         <DropdownMenuTrigger asChild>
                             <div
                                 className={cn(
-                                    'model-controls__variant-trigger flex items-center gap-1.5 transition-colors cursor-pointer hover:bg-transparent hover:opacity-70 min-w-0',
+                                    'model-controls__variant-trigger flex items-center gap-1.5 transition-colors cursor-pointer select-none hover:bg-transparent hover:opacity-70 min-w-0',
                                     buttonHeight,
                                 )}
                             >
@@ -2767,14 +2777,14 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             return (
                 <div className="flex items-center gap-2 min-w-0">
                     <Tooltip delayDuration={600}>
-                        <DropdownMenu open={isReady && isAgentSelectorOpen} onOpenChange={isReady ? setIsAgentSelectorOpen : undefined}>
+                        <DropdownMenu open={canSelectAgent && isAgentSelectorOpen} onOpenChange={canSelectAgent ? setIsAgentSelectorOpen : undefined}>
                             <TooltipTrigger asChild>
                                 <DropdownMenuTrigger asChild>
                                     <div className={cn(
-                                        'flex items-center gap-1.5 transition-colors cursor-pointer hover:bg-transparent hover:opacity-70 min-w-0',
+                                        'flex items-center gap-1.5 transition-colors cursor-pointer select-none hover:bg-transparent hover:opacity-70 min-w-0',
                                         buttonHeight
                                     )}>
-                                        {!isReady ? (
+                                        {!agentSelectionReady ? (
                                             <>
                                                 <Icon name="loader-4"
                                                     className={cn(
@@ -2885,18 +2895,18 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         return (
             <button
                 type="button"
-                onClick={isReady ? () => setActiveMobilePanel('agent') : undefined}
-                onTouchStart={isReady ? () => handleLongPressStart('agent') : undefined}
-                onTouchEnd={isReady ? handleLongPressEnd : undefined}
-                onTouchCancel={isReady ? handleLongPressEnd : undefined}
-                disabled={!isReady}
+                onClick={canSelectAgent ? () => setActiveMobilePanel('agent') : undefined}
+                onTouchStart={canSelectAgent ? () => handleLongPressStart('agent') : undefined}
+                onTouchEnd={canSelectAgent ? handleLongPressEnd : undefined}
+                onTouchCancel={canSelectAgent ? handleLongPressEnd : undefined}
+                disabled={!canSelectAgent}
                 className={cn(
                     'model-controls__agent-trigger flex items-center gap-1.5 transition-colors min-w-0 focus:outline-none',
                     buttonHeight,
-                    isReady ? 'cursor-pointer hover:bg-transparent hover:opacity-70' : 'opacity-60 cursor-not-allowed',
+                    canSelectAgent ? 'cursor-pointer hover:bg-transparent hover:opacity-70' : 'opacity-60 cursor-not-allowed',
                 )}
             >
-                {!isReady ? (
+                {!agentSelectionReady ? (
                     <>
                         <Icon name="loader-4"
                             className={cn(
