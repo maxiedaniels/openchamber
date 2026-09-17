@@ -21,7 +21,7 @@ import type { IconName } from "@/components/icon/icons";
 import { ModelPickerList, type ModelPickerEntry } from '@/components/model-picker/ModelPickerList';
 import { useIsVSCodeRuntime } from '@/hooks/useRuntimeAPIs';
 import { isDesktopShell } from '@/lib/desktop';
-import { getAgentColor } from '@/lib/agentColors';
+import { useAgentColors } from '@/hooks/useAgentColors';
 import { useDeviceInfo } from '@/lib/device';
 import { mergeModelMetadataWithLiveModel } from '@/lib/modelMetadata';
 import { getModelDisplayName as getSharedModelDisplayName } from '@/lib/modelDisplay';
@@ -327,6 +327,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const { isReady: canSelectAgent } = useOpenCodeReadiness('agents');
     const readinessLabel = isUnavailable ? t('common.unavailable') : t('common.loading');
     const providers = useConfigStore((state) => state.providers);
+    const getAgentColor = useAgentColors();
     const currentProviderId = useConfigStore((state) => selection ? selection.model?.providerId ?? '' : state.currentProviderId);
     const currentModelId = useConfigStore((state) => selection ? selection.model?.modelId ?? '' : state.currentModelId);
     const effectiveCurrentVariant = useConfigStore((state) => state.currentVariant);
@@ -920,18 +921,17 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             ? latestLoadedUserChoice.variant
             : undefined;
         const restoreAgentName = latestLoadedUserChoice.agent || currentAgentName || undefined;
-        // A message carrying no effort is not evidence that the user has none:
-        // a send under an explicit "Default" carries none either, and the echo
-        // of that very send arrives here. Keep what the session already
-        // recorded, and let a concrete historical effort replace it.
-        const restoredVariant = historicalVariant ?? (currentSessionId && restoreAgentName
+        // A saved choice may be newer than the last sent message, including an
+        // explicit Default. Reloading history must not replace that choice.
+        const savedVariant = currentSessionId && restoreAgentName
             ? getAgentModelVariantForSession(
                 currentSessionId,
                 restoreAgentName,
                 latestLoadedUserChoice.providerID,
                 latestLoadedUserChoice.modelID,
             )
-            : undefined);
+            : undefined;
+        const restoredVariant = savedVariant !== undefined ? savedVariant : historicalVariant;
         const applyResult = applyModelSelectionWithVariant(
             latestLoadedUserChoice.providerID,
             latestLoadedUserChoice.modelID,
@@ -1023,9 +1023,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                     }
                     return 'resolved';
                 }
-                if (result === 'provider-missing') {
-                    return 'waiting';
-                }
+                return 'waiting';
             }
 
             for (const agent of agents) {
@@ -1045,9 +1043,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                     }
                     return 'resolved';
                 }
-                if (result === 'provider-missing') {
-                    return 'waiting';
-                }
+                return 'waiting';
             }
 
             return 'continue';
@@ -1219,8 +1215,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         // user selection while drafting.
         if (!currentSessionId) {
             if (currentVariantSelection.override === undefined && !manualVariantSelectionRef.current) {
-                const inheritedVariant = resolveInheritedVariantForModel(currentProviderId, currentModelId);
-                setCurrentVariantOverride(undefined, inheritedVariant);
+                const desired = resolveInheritedVariantForModel(currentProviderId, currentModelId);
+                setCurrentVariantOverride(undefined, desired);
             }
             return;
         }
@@ -1766,7 +1762,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                             onClick={() => handleMobileModelApply(providerId, modelId, resolvedVariant)}
                             className={cn(
                                 'flex flex-1 min-w-0 items-start gap-2 text-left',
-                                'focus:outline-none focus-visible:ring-1 focus-visible:ring-primary rounded-lg'
+                                'focus:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-lg'
                             )}
                         >
                             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -1777,7 +1773,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                     <span className="typography-meta font-medium text-foreground truncate">
                                         {getModelDisplayName(model)}
                                     </span>
-                                    {isSelected ? <Icon name="check" className="size-4 flex-shrink-0 text-primary" /> : null}
+                                    {isSelected ? <Icon name="check" className="size-4 flex-shrink-0 text-inherit" /> : null}
                                 </div>
                                 {contextText || indicatorIcons.length > 0 ? (
                                     <div className="flex min-w-0 items-center gap-1.5 overflow-hidden typography-micro text-muted-foreground">
@@ -1859,7 +1855,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                             className={cn(
                                                 'inline-flex items-center rounded-full border px-2.5 py-1 typography-meta font-medium',
                                                 isVariantSelected
-                                                    ? 'border-primary/30 bg-primary/10 text-foreground'
+                                                    ? 'border-border bg-interactive-selection text-interactive-selection-foreground'
                                                     : 'border-border/40 text-muted-foreground hover:bg-interactive-hover/50'
                                             )}
                                             aria-pressed={isVariantSelected}
@@ -2075,13 +2071,13 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                         type="button"
                         className={cn(
                             'flex w-full items-center justify-between gap-2 rounded-xl border px-2 py-1.5 text-left',
-                            'focus:outline-none focus-visible:ring-1 focus-visible:ring-primary',
-                            isDefault ? 'border-primary/30 bg-primary/10' : 'border-border/40'
+                            'focus:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                            isDefault ? 'border-border bg-interactive-selection text-interactive-selection-foreground' : 'border-border/40'
                         )}
                         onClick={() => handleSelect(undefined)}
                     >
                         <span className="typography-meta font-medium text-foreground">{t('chat.modelControls.default')}</span>
-                        {isDefault && <Icon name="check" className="size-4 text-primary flex-shrink-0" />}
+                        {isDefault && <Icon name="check" className="size-4 text-inherit flex-shrink-0" />}
                     </button>
 
                     {targetVariants.map((variant) => {
@@ -2094,13 +2090,13 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                 type="button"
                                 className={cn(
                                     'flex w-full items-center justify-between gap-2 rounded-xl border px-2 py-1.5 text-left',
-                                    'focus:outline-none focus-visible:ring-1 focus-visible:ring-primary',
-                                    selected ? 'border-primary/30 bg-primary/10' : 'border-border/40'
+                                    'focus:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                                    selected ? 'border-border bg-interactive-selection text-interactive-selection-foreground' : 'border-border/40'
                                 )}
                                 onClick={() => handleSelect(variant)}
                             >
-                                <span className="typography-meta font-medium text-foreground">{label}</span>
-                                {selected && <Icon name="check" className="size-4 text-primary flex-shrink-0" />}
+                                <span className="typography-meta font-medium text-inherit">{label}</span>
+                                {selected && <Icon name="check" className="size-4 text-inherit flex-shrink-0" />}
                             </button>
                         );
                     })}
@@ -2129,17 +2125,17 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                 type="button"
                                 className={cn(
                                     'flex w-full flex-col gap-1.5 rounded-xl border px-3 py-2.5 text-left',
-                                    'focus:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+                                    'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                                     'touch-manipulation cursor-pointer transition-colors',
-                                    'active:bg-interactive-hover',
+                                    'active:bg-interactive-active',
                                     isSelected 
-                                        ? 'border-primary/50 bg-interactive-selection/20' 
+                                        ? 'border-border bg-interactive-selection text-interactive-selection-foreground'
                                         : 'border-border/40 hover:bg-interactive-hover/50'
                                 )}
                                 onClick={() => handleAgentChange(agent.name)}
                             >
                                 <div className="flex items-center gap-2">
-                                    <div className={cn('size-2.5 rounded-full flex-shrink-0', agentColor.class)} />
+                                    <div className={cn('size-2.5 rounded-full flex-shrink-0 agent-dot', agentColor.class)} />
                                     <span
                                         className="typography-ui-label font-semibold"
                                         style={isSelected ? { color: `var(${agentColor.var})` } : undefined}
@@ -2758,7 +2754,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                 >
                                     <div className="flex items-center justify-between gap-2 w-full min-w-0">
                                         <span className="typography-meta font-medium text-foreground truncate min-w-0">{label}</span>
-                                        {selected && <Icon name="check" className="size-4 text-primary flex-shrink-0" />}
+                                        {selected && <Icon name="check" className="size-4 text-inherit flex-shrink-0" />}
                                     </div>
                                 </DropdownMenuItem>
                             );
