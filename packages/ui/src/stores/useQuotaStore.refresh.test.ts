@@ -58,7 +58,7 @@ describe('quota refresh failure is not empty success', () => {
   test('another provider succeeding does not clear a failed provider or its error', async () => {
     await useQuotaStore.getState().fetchProviderQuota('claude');
     handleRequest = async url => {
-      if (url.endsWith('/claude')) throw new Error('claude unreachable');
+      if (url.includes('/claude?')) throw new Error('claude unreachable');
       await pause();
       return json(result('codex'));
     };
