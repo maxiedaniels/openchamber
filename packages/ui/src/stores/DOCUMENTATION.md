@@ -193,6 +193,16 @@ entry is not a request to replace a user's choice. Directory snapshots retain
 the effort override separately from its inherited value, including explicit
 `Default`. Fresh drafts inherit their project's effort before the global one.
 
+The agent and the model carry separate provenance. `setAgent` records the agent
+as picked (`agentSelectionSource: 'manual'`) and leaves `selectionSource` to
+describe the model alone, so an agent's pinned model stays inherited and is
+never saved as a per-agent session override. Every path that re-resolves
+defaults (`loadAgents`, the config-defaults reconcile, `loadSessionDefaults`,
+the draft re-apply after activation, the Defaults settings page) keeps a picked
+agent together with the model `setAgent` resolved for it. Only
+`applyDefaultModelAgentSelection` and activating a directory with no snapshot
+clear the pick.
+
 Project-default editing is available in desktop web and Electron. Hosted mobile
 and Capacitor consume those defaults through the shared composer but have no
 project-default editor. VS Code retains its workspace-project behavior and does

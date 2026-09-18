@@ -1019,6 +1019,74 @@ describe('useConfigStore provider persistence', () => {
     expect(useSelectionStore.getState().getAgentModelForSession(sessionId, 'plan')).toBeNull();
   });
 
+  test('a picked agent survives an agents reload, with its inherited model still inherited', async () => {
+    const agentsList = [
+      testAgent('build', { model: { providerID: 'openai', modelID: 'gpt-5.6-sol' } }),
+      testAgent('Build - Gemini', { model: { providerID: 'google', modelID: 'antigravity-gemini-3.8-flash' } }),
+      testAgent('plan'),
+    ];
+    const providersList = [
+      provider('openai', 'gpt-5.6-sol'),
+      provider('google', 'antigravity-gemini-3.8-flash'),
+    ];
+    listAgentsImpl = async () => agentsList;
+    useConfigStore.setState({
+      activeDirectoryKey: DIRECTORY,
+      providers: providersList,
+      agents: agentsList,
+      currentProviderId: 'openai',
+      currentModelId: 'gpt-5.6-sol',
+      currentAgentName: 'build',
+      selectionSource: 'auto',
+      agentSelectionSource: 'auto',
+      currentVariant: undefined,
+      directoryScoped: {},
+    });
+
+    useConfigStore.getState().setAgent('Build - Gemini');
+    await useConfigStore.getState().loadAgents({ directory: DIRECTORY, source: 'test:pickedPinnedAgent' });
+
+    expect(useConfigStore.getState().currentAgentName).toBe('Build - Gemini');
+    expect(useConfigStore.getState().currentModelId).toBe('antigravity-gemini-3.8-flash');
+    // The pin was inherited, not chosen: a reload must not promote it.
+    expect(useConfigStore.getState().selectionSource).toBe('auto');
+
+    useConfigStore.getState().setAgent('plan');
+    await useConfigStore.getState().loadAgents({ directory: DIRECTORY, source: 'test:pickedUnpinnedAgent' });
+
+    expect(useConfigStore.getState().currentAgentName).toBe('plan');
+  });
+
+  test('default selection clears an agent pick so the next draft resolves defaults again', async () => {
+    const agentsList = [
+      testAgent('build', { model: { providerID: 'openai', modelID: 'gpt-5.6-sol' } }),
+      testAgent('Build - Gemini', { model: { providerID: 'google', modelID: 'antigravity-gemini-3.8-flash' } }),
+    ];
+    listAgentsImpl = async () => agentsList;
+    useConfigStore.setState({
+      activeDirectoryKey: DIRECTORY,
+      providers: [
+        provider('openai', 'gpt-5.6-sol'),
+        provider('google', 'antigravity-gemini-3.8-flash'),
+      ],
+      agents: agentsList,
+      currentProviderId: 'openai',
+      currentModelId: 'gpt-5.6-sol',
+      currentAgentName: 'build',
+      selectionSource: 'auto',
+      agentSelectionSource: 'auto',
+      settingsDefaultsLoaded: true,
+      directoryScoped: {},
+    });
+
+    useConfigStore.getState().setAgent('Build - Gemini');
+    useConfigStore.getState().applyDefaultModelAgentSelection();
+    await useConfigStore.getState().loadAgents({ directory: DIRECTORY, source: 'test:pickCleared' });
+
+    expect(useConfigStore.getState().agentSelectionSource).toBe('auto');
+    expect(useConfigStore.getState().currentAgentName).toBe('build');
+  });
+
   test('setAgent carries an explicit override from a pinned agent to an unpinned agent', () => {
     const sessionId = 'ses_explicit_override_from_pinned';
     useSessionUIStore.setState({ currentSessionId: sessionId });
