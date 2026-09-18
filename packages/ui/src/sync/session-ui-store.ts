@@ -698,7 +698,8 @@ const applyDraftTargetSelectionDefaults = (
       || current.newSessionDraft.target !== draft.target
       || current.newSessionDraft.selectedProjectId !== draft.selectedProjectId
       || useConfigStore.getState().selectionSource === 'manual'
-      || useConfigStore.getState().agentSelectionSource === 'manual') return
+      || useConfigStore.getState().agentSelectionSource === 'manual'
+      || useConfigStore.getState().currentVariantSelection.override !== undefined) return
     applyDefaults()
   })
 }

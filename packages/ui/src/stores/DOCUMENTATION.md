@@ -201,7 +201,8 @@ defaults (`loadAgents`, the config-defaults reconcile, `loadSessionDefaults`,
 the draft re-apply after activation, the Defaults settings page) keeps a picked
 agent together with the model `setAgent` resolved for it. Only
 `applyDefaultModelAgentSelection` and activating a directory with no snapshot
-clear the pick.
+clear the pick. An effort picked in a draft is a choice of its own: those same
+paths leave the draft alone while `currentVariantSelection.override` is set.
 
 Project-default editing is available in desktop web and Electron. Hosted mobile
 and Capacitor consume those defaults through the shared composer but have no

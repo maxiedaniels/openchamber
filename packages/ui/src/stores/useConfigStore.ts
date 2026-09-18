@@ -2213,7 +2213,10 @@ export const useConfigStore = create<ConfigStore>()(
                     });
                     const state = get();
                     const projectDefaults = getProjectDefaultsForConfigDirectory(fromDirectoryKey(state.activeDirectoryKey));
+                    // An effort picked while the settings document was still loading
+                    // is a choice too; re-applying the defaults would clear it.
                     if (!useSessionUIStore.getState().currentSessionId && state.selectionSource === 'auto' && state.agentSelectionSource === 'auto'
+                        && state.currentVariantSelection.override === undefined
                         && (projectDefaults.projectDefaultModel || state.settingsDefaultModel)) {
                         state.applyDefaultModelAgentSelection(projectDefaults);
                     }

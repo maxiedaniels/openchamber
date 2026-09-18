@@ -1456,6 +1456,29 @@ describe('useConfigStore provider persistence', () => {
     expect(useConfigStore.getState().getCurrentModel()?.id).toBe('chosen');
   });
 
+  test('an effort picked in a draft survives the settings document arriving late', async () => {
+    persistedOpenChamberSettings = { defaultModel: 'sidecar/chosen', defaultVariant: 'high' };
+    useConfigStore.setState({
+      activeDirectoryKey: DIRECTORY,
+      providers: [provider('sidecar', 'chosen')],
+      agents: [testAgent('build')],
+      currentProviderId: 'sidecar',
+      currentModelId: 'chosen',
+      currentAgentName: 'build',
+      selectionSource: 'auto',
+      agentSelectionSource: 'auto',
+      settingsDefaultsLoaded: false,
+      directoryScoped: {},
+    });
+
+    useConfigStore.getState().setCurrentVariantOverride('low', 'high');
+    await useConfigStore.getState().loadSessionDefaults();
+
+    expect(useConfigStore.getState().settingsDefaultVariant).toBe('high');
+    expect(useConfigStore.getState().currentVariant).toBe('low');
+    expect(useConfigStore.getState().currentVariantSelection.override).toBe('low');
+  });
+
   test('does not choose Big Pickle while settings are still loading', async () => {
     useConfigStore.setState({ settingsDefaultsLoaded: false });
     getProvidersForConfigImpl = async () => ({ providers: [providerResponse('opencode', 'big-pickle')], default: { default: 'opencode' } });
