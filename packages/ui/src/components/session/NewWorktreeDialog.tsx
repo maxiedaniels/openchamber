@@ -47,6 +47,7 @@ import { getWorktreeSetupWaitEnabled } from '@/lib/openchamberConfig';
 import { resolveWorktreeSetupCommands } from '@/lib/sharedTrustConfirmation';
 import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
 import { generateBranchSlug } from '@/lib/git/branchNameGenerator';
+import { handleWorktreeCreateKeyDown } from './worktreeCreateKeyboard';
 import { renderMagicPrompt } from '@/lib/magicPrompts';
 import { postLinearSessionStarted } from '@/lib/linearSessionStatus';
 import { parseModelIdentifier } from '@/lib/modelIdentifier';
@@ -1083,7 +1084,7 @@ export function NewWorktreeDialog({
             ? `#${linkedPrState.number} ${linkedPrState.title}`.trim()
             : t('session.newWorktree.newSessionTitle');
 
-        const session = await sessionActions.createSession(sessionTitle, metadata.path, null);
+        const session = await sessionActions.createSession(sessionTitle, metadata.path);
         if (!session?.id) {
           throw new Error('Failed to create session');
         }
@@ -1267,6 +1268,13 @@ export function NewWorktreeDialog({
 
   const canCreate = isFormValid && !isCreating;
 
+  const handleCreateKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    handleWorktreeCreateKeyDown(event, () => {
+      if (!canCreate) return;
+      void handleCreate();
+    });
+  };
+
   const handleClearLinkedItem = () => {
     setNewBranchState(prev => ({
       ...prev,
@@ -1326,11 +1334,11 @@ export function NewWorktreeDialog({
   const footerContent = (
     <div className={cn('flex gap-2', isMobile ? 'flex-col w-full' : 'flex-row items-center')}>
       {/* Validation error */}
-      <div className={cn('flex items-center gap-1.5 text-destructive', isMobile ? 'w-full justify-center order-first' : 'mr-auto')}> 
+      <div className={cn('flex min-w-0 items-start gap-1.5 text-destructive', isMobile ? 'w-full justify-center order-first' : 'mr-auto')}> 
         {validation.touched && (validation.branchError || validation.worktreeError) && (
           <>
-            <Icon name="error-warning" className="h-3.5 w-3.5" />
-            <span className="typography-micro">
+            <Icon name="error-warning" className="mt-px h-3.5 w-3.5 shrink-0" />
+            <span className="typography-micro min-w-0 [overflow-wrap:anywhere]">
               {validation.branchError || validation.worktreeError}
             </span>
           </>
@@ -1571,6 +1579,7 @@ export function NewWorktreeDialog({
                     }));
                   }}
                   onBlur={() => setValidation(prev => ({ ...prev, touched: true }))}
+                  onKeyDown={handleCreateKeyDown}
                   placeholder={t('session.newWorktree.branchNamePlaceholder')}
                   disabled={!!newBranchState.linkedPr}
                   className={cn(
@@ -1667,6 +1676,7 @@ export function NewWorktreeDialog({
                   }
                 }}
                 onBlur={() => setValidation(prev => ({ ...prev, touched: true }))}
+                onKeyDown={handleCreateKeyDown}
                 placeholder={t('session.newWorktree.worktreeDirectoryPlaceholder')}
                 className={cn(
                   'h-8',
@@ -2093,6 +2103,7 @@ export function NewWorktreeDialog({
                       }));
                     }}
                     onBlur={() => setValidation(prev => ({ ...prev, touched: true }))}
+                    onKeyDown={handleCreateKeyDown}
                     placeholder={t('session.newWorktree.branchNamePlaceholder')}
                     disabled={!!newBranchState.linkedPr}
                     className={cn(
@@ -2189,6 +2200,7 @@ export function NewWorktreeDialog({
                     }
                   }}
                   onBlur={() => setValidation(prev => ({ ...prev, touched: true }))}
+                  onKeyDown={handleCreateKeyDown}
                   placeholder={t('session.newWorktree.worktreeDirectoryPlaceholder')}
                   className={cn(
                     'h-8',
@@ -2404,19 +2416,19 @@ export function NewWorktreeDialog({
 
             {/* Footer */}
             <DialogFooter className="mt-1 flex items-center justify-between">
-              {/* Validation error - inline with buttons */}
-              <div className="flex items-center gap-1.5 text-destructive">
+              {/* Validation error - inline with buttons; long server messages (full paths) wrap */}
+              <div className="flex min-w-0 flex-1 items-start gap-1.5 text-destructive">
                 {validation.touched && (validation.branchError || validation.worktreeError) && (
                   <>
-                    <Icon name="error-warning" className="h-3.5 w-3.5" />
-                    <span className="typography-micro">
+                    <Icon name="error-warning" className="mt-px h-3.5 w-3.5 shrink-0" />
+                    <span className="typography-micro min-w-0 [overflow-wrap:anywhere]">
                       {validation.branchError || validation.worktreeError}
                     </span>
                   </>
                 )}
               </div>
               
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 <Button
                   variant="outline"
                   size="sm"

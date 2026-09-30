@@ -7,7 +7,7 @@
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test"
 import { create, type StoreApi } from "zustand"
-import type { Message, Part, SessionStatus } from "@opencode-ai/sdk/v2/client"
+import type { Message, Part, SessionStatus } from "@/lib/opencode/model"
 import { INITIAL_STATE } from "../types"
 import type { DirectoryStore } from "../child-store"
 
@@ -16,13 +16,16 @@ type StatusSnapshot = Record<string, SessionStatus | undefined>
 let respondWithSnapshot: () => Promise<StatusSnapshot | null> = () => Promise.resolve({ ses_1: { type: "idle" } })
 const statusSnapshotCalls: string[] = []
 let runtimeKey = "test-runtime"
+// The v2 status snapshot is global; the tests still assert which directory
+// asked for it, so the directory under test is recorded alongside each call.
+const pollingDirectory = "/test/project"
 let sdkIdentity = {}
 
 mock.module("@/lib/opencode/client", () => ({
   opencodeClient: {
     getSdkClient: () => sdkIdentity,
-    getSessionStatusForDirectory: mock((directory: string) => {
-      statusSnapshotCalls.push(directory)
+    getActiveSessionStatuses: mock(() => {
+      statusSnapshotCalls.push(pollingDirectory)
       return respondWithSnapshot()
     }),
   },
@@ -33,6 +36,7 @@ mock.module("@/lib/runtime-switch", () => ({
 }))
 
 import { applyGlobalSessionStatusSnapshot, useGlobalSessionStatusStore } from "../global-session-status"
+import { recordObservedTurn } from "../observed-turns"
 import { useSessionOrderingStore } from "../session-ordering"
 import { useSessionActivityTimingStore } from "../session-activity-timing"
 
@@ -55,11 +59,12 @@ const createStore = (status?: SessionStatus): StoreApi<DirectoryStore> => {
 
 // SAFETY: The recovery path reads only the identity, role, and completion time
 // fields from this synthetic assistant message.
+// Its records are fresh: a turn another process is running right now.
 const unfinishedAssistant = {
   id: "msg_1",
   sessionID: "ses_1",
   role: "assistant",
-  time: { created: 1 },
+  time: { created: Date.now() },
 } as Message
 
 // SAFETY: The recovery path reads only the tool discriminator and state fields
@@ -70,7 +75,7 @@ const runningTool = {
   sessionID: "ses_1",
   type: "tool",
   tool: "bash",
-  state: { status: "running", time: { start: 1 }, input: {} },
+  state: { status: "running", time: { start: Date.now() }, input: {} },
 } as Part
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -174,8 +179,9 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     expect(store.getState().session_status?.ses_1?.type).toBe("idle")
   })
 
-  test("recovers an unfinished turn after reload when status was initially unknown", async () => {
+  test("recovers an unfinished turn it watched run when status was initially unknown", async () => {
     const store = createStore()
+    recordObservedTurn(store, "ses_1", { type: "busy" })
     store.getState().patch({
       message: { ses_1: [unfinishedAssistant] },
       part: { msg_1: [runningTool] },
@@ -191,6 +197,39 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     const part = store.getState().part.msg_1[0]
     expect(part?.type).toBe("tool")
     if (part?.type === "tool") expect(part.state.status).toBe("error")
+  })
+
+  test("keeps an unfinished turn it never watched open after reload (#4156)", async () => {
+    const store = createStore()
+    store.getState().patch({
+      message: { ses_1: [unfinishedAssistant] },
+      part: { msg_1: [runningTool] },
+    })
+
+    await recoverInterruptedTurnAfterMessageLoad("/test/project", store, "ses_1")
+
+    expect(store.getState().session_status?.ses_1?.type).toBe("idle")
+    expect(store.getState().message.ses_1[0]).toBe(unfinishedAssistant)
+    expect(store.getState().part.msg_1[0]).toBe(runningTool)
+  })
+
+  test("a busy snapshot counts as watching the run", async () => {
+    const store = createStore()
+    store.getState().patch({
+      message: { ses_1: [unfinishedAssistant] },
+      part: { msg_1: [runningTool] },
+    })
+    respondWithSnapshot = () => Promise.resolve({ ses_1: { type: "busy" } })
+    await recoverInterruptedTurnAfterMessageLoad("/test/project", store, "ses_1")
+    expect(store.getState().message.ses_1[0]).toBe(unfinishedAssistant)
+
+    // The connected server dies mid-turn; the next snapshot no longer lists it.
+    store.getState().patch({ session_status: {} })
+    respondWithSnapshot = () => Promise.resolve({})
+    await recoverInterruptedTurnAfterMessageLoad("/test/project", store, "ses_1")
+
+    const message = store.getState().message.ses_1[0]
+    expect(message?.role === "assistant" && message.time.completed !== undefined).toBe(true)
   })
 
   for (const change of ["runtime", "sdk", "request"] as const) {

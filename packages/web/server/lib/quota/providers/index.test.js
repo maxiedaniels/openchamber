@@ -1,5 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('../../opencode/auth.js', () => ({ readOpenCodeCredentials: async () => ({}) }));
+
 import * as google from './google/index.js';
 import { fetchQuotaForProvider, listConfiguredQuotaProviders } from './index.js';
 
@@ -11,8 +13,8 @@ describe('quota provider registry', () => {
     expect(typeof google.resolveGoogleAuthSources).toBe('function');
   });
 
-  it('can list configured providers without missing provider exports', () => {
-    expect(() => listConfiguredQuotaProviders()).not.toThrow();
+  it('can list configured providers without missing provider exports', async () => {
+    await expect(listConfiguredQuotaProviders()).resolves.toBeInstanceOf(Array);
   });
 
   it('coalesces concurrent refreshes by provider ID', async () => {
@@ -46,7 +48,7 @@ describe('malformed usage-providers.json isolation', () => {
       },
     }));
     const registry = await import('./index.js');
-    expect(() => registry.listConfiguredQuotaProviders()).not.toThrow();
+    await expect(registry.listConfiguredQuotaProviders()).resolves.toBeInstanceOf(Array);
     const result = await registry.fetchQuotaForProvider('codex');
     expect(result.ok).toBe(false);
     expect(result.configured).toBe(true);
